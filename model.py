@@ -94,7 +94,7 @@ class SimpleFPN(nn.Module):
         self.fpn1 = nn.Sequential(
             nn.ConvTranspose2d(self.backbone_channel, self.backbone_channel // 2, 2, 2),
             create_norm_layer(norm_layer, self.backbone_channel // 2),
-            nn.GELU(),
+            nn.ReLU(),
             nn.ConvTranspose2d(
                 self.backbone_channel // 2, self.backbone_channel // 4, 2, 2
             ),
@@ -121,8 +121,15 @@ class SimpleFPN(nn.Module):
             fpn_conv = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
 
             self.lateral_convs.append(l_conv)
-            self.fpn_convs.append(fpn_conv)
+            self.fpn_convs.append(fpn_conv) 
+        
+        self._init_weights()
 
+    def _init_weights(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_normal_(p)
+    
     def forward(self, x) -> tuple:
         """Forward function.
 
@@ -190,32 +197,40 @@ class MultiScalePixelDecoder(nn.Module):
             lateral_conv = nn.Sequential(
                 nn.Conv2d(in_channels[i], hidden_dim, kernel_size=1),
                 nn.GroupNorm(8, hidden_dim),
-                nn.GELU(),
+                nn.ReLU(),
             )
             output_conv = nn.Sequential(
                 nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, stride=1, padding=1),
                 nn.GroupNorm(8, hidden_dim),
-                nn.GELU(),
+                nn.ReLU(),
             )
             self.lateral_convs.append(lateral_conv)
             self.output_convs.append(output_conv)
 
         self.last_feat_conv = nn.Sequential(
-            nn.Conv2d(in_channels[1], hidden_dim, kernel_size=3, padding=1, stride=1)
+            nn.Conv2d(in_channels[1], hidden_dim, kernel_size=3, padding=1, stride=1),
+            create_norm_layer(norm_layer, hidden_dim)
         )
 
         self.mask_feature = nn.Conv2d(
             hidden_dim, out_channels, kernel_size=3, stride=1, padding=1
         )
 
-    def init_weights(self) -> None:
+        self._init_weights()
+        
+    def _init_weights(self):
         """Initialize weights."""
-        for i in range(0, self.num_inputs - 2):
-            nn.init.xavier_normal(self.lateral_convs[i].conv, bias=0)
-            nn.init.xavier_normal(self.output_convs[i].conv, bias=0)
+        for layers in [self.lateral_convs,self.output_convs]:
+            for layer in layers.modules():
+                if isinstance(layer, nn.Conv2d):
+                    nn.init.xavier_normal_(layer.weight)
+        
 
-        nn.init.xavier_normal(self.mask_feature, bias=0)
-        nn.init.xavier_normal(self.last_feat_conv, bias=0)
+        for layer in self.last_feat_conv:
+            if isinstance(layer, nn.Conv2d):
+                nn.init.xavier_normal_(layer.weight)
+
+        nn.init.xavier_normal_(self.mask_feature.weight)
 
     def forward(self, feats):
         """
@@ -261,15 +276,6 @@ class CrossAttentionLayer(nn.Module):
                 nn.init.xavier_uniform_(p)
     
     def forward(self, tgt, memory, attn_mask, key_padding_mask, pos=None, query_pos=None):
-        # self,
-        # query: Tensor,
-        # key: Tensor,
-        # value: Tensor,
-        # key_padding_mask: Optional[Tensor] = None,
-        # need_weights: bool = True,
-        # attn_mask: Optional[Tensor] = None,
-        # average_attn_weights: bool = True,
-        # is_causal: bool = False,
         logger.debug(f"[CrossAttentionLayer::forward] tgt shape: {tgt.shape}, memory shape: {memory.shape}")
         logger.debug(f"[CrossAttentionLayer::forward] pos shape: {pos.shape if pos is not None else None}")
 
@@ -308,9 +314,10 @@ class FFNLayer(nn.Module):
         self.lin2 = nn.Linear(hidden_dim, embed_dim)
         
         self.norm = nn.LayerNorm(embed_dim)
-        self.act  = nn.GELU()
+        self.act  = nn.ReLU()
+        self._init_weights()
 
-    def _init_weight(self):
+    def _init_weights(self):
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
@@ -331,10 +338,16 @@ class MLP(nn.Module):
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
         self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+        self._init_weights()
 
+    def _init_weights(self):
+        for p in self.layers.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_normal_(p)
+    
     def forward(self, x):
         for i, layer in enumerate(self.layers):
-            x = F.gelu(layer(x)) if i < self.num_layers - 1 else layer(x)
+            x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
         return x
 
 class TransformerDecoder(nn.Module):
